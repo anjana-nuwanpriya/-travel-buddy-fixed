@@ -1,16 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
-import 'package:url_launcher/url_launcher.dart';
-import 'package:app_links/app_links.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'dart:async';
-import 'dart:convert';
 import '../config/supabase_config.dart';
 import 'session_manager.dart';
 
-/// Simplified Unified Auth Service - with External Browser OAuth
-/// Uses system browser for Google OAuth (complies with Google's secure browser policy)
+/// Unified Auth Service with Native Google Sign-In
+/// Provides the best UX for mobile apps - native account picker, no browser redirect
 class SimplifiedUnifiedAuthService {
   static final SimplifiedUnifiedAuthService _instance =
       SimplifiedUnifiedAuthService._internal();
@@ -23,50 +20,39 @@ class SimplifiedUnifiedAuthService {
 
   final SupabaseClient _supabase = SupabaseConfig.client;
   final SessionManager _sessionManager = SessionManager();
-  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
   
-  // Deep link handling
-  StreamSubscription? _linkSubscription;
-  Completer<Map<String, dynamic>>? _authCompleter;
+  // ✅ Native Google Sign-In configuration
+  // Use your Web Client ID from Google Cloud Console
+  // (NOT the Android client ID - use the Web one for Supabase)
+  static const String _googleWebClientId = 
+      '187097738490-9ovt2i9c26tvgq187k6g08srr49fc1qk.apps.googleusercontent.com';
   
-  // Redirect URL for OAuth
-  static const String _redirectScheme = 'com.anjana.travelbuddy';
-  static const String _redirectUrl = '$_redirectScheme://login-callback';
+  // For iOS, you also need the iOS client ID
+  static const String _googleIOSClientId = 
+      '187097738490-XXXXXXXXXXXXXXXXXXXXXXXXXXXX.apps.googleusercontent.com'; // Replace with your iOS client ID
   
-  // Storage keys for OAuth tokens
-  static const String _accessTokenKey = 'oauth_access_token';
-  static const String _refreshTokenKey = 'oauth_refresh_token';
+  late final GoogleSignIn _googleSignIn;
 
   /// Initialize the auth service (call this in main.dart after Supabase init)
   Future<void> initialize() async {
     debugPrint('🔐 Initializing Auth Service...');
-    _setupDeepLinkListener();
-  }
-
-  /// Setup deep link listener for OAuth callbacks
-  void _setupDeepLinkListener() {
-    final appLinks = AppLinks();
     
-    // Handle initial link (if app was opened via deep link)
-    appLinks.getInitialLink().then((Uri? uri) {
-      if (uri != null && uri.scheme == _redirectScheme) {
-        debugPrint('🔗 Initial deep link: $uri');
-        _handleOAuthCallback(uri);
-      }
-    });
+    // Initialize Google Sign-In
+    _googleSignIn = GoogleSignIn(
+      // Use web client ID for server auth code
+      serverClientId: _googleWebClientId,
+      scopes: [
+        'email',
+        'profile',
+      ],
+    );
     
-    // Listen for incoming links
-    _linkSubscription = appLinks.uriLinkStream.listen((Uri uri) {
-      debugPrint('🔗 Received deep link: $uri');
-      if (uri.scheme == _redirectScheme) {
-        _handleOAuthCallback(uri);
-      }
-    });
+    debugPrint('✅ Auth Service initialized');
   }
 
   /// Dispose resources
   void dispose() {
-    _linkSubscription?.cancel();
+    // No cleanup needed for native Google Sign-In
   }
 
   // ==================== SIGN IN - PHONE ====================
@@ -432,114 +418,141 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  // ==================== SIGN UP - GOOGLE (EXTERNAL BROWSER) ====================
-
-  /// Google OAuth using External Browser
+  // ==================== NATIVE GOOGLE SIGN-IN ====================
+  
+  /// ✅ NATIVE Google Sign-In - Best UX!
+  /// Shows the native Google account picker (same as YouTube, Gmail, etc.)
+  /// No browser redirect, seamless experience
   Future<Map<String, dynamic>> signUpWithGoogle(BuildContext context) async {
     try {
-      debugPrint('🔍 [GOOGLE OAUTH] Starting external browser OAuth');
+      debugPrint('🔍 [GOOGLE] Starting native Google Sign-In...');
 
-      // Create a completer to wait for the callback
-      _authCompleter = Completer<Map<String, dynamic>>();
+      // Show loading indicator
+      _showLoadingDialog(context, 'Signing in with Google...');
 
-      // Build the Supabase OAuth URL
-      final authUrl = '${SupabaseConfig.supabaseUrl}/auth/v1/authorize'
-          '?provider=google'
-          '&redirect_to=${Uri.encodeComponent(_redirectUrl)}';
+      // Trigger native Google Sign-In
+      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
 
-      debugPrint('📍 Auth URL: $authUrl');
-
-      // Show loading dialog
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) => PopScope(
-          canPop: false,
-          onPopInvokedWithResult: (didPop, result) {
-            if (!didPop) {
-              _authCompleter?.complete({
-                'success': false,
-                'message': 'Sign in cancelled',
-              });
-              Navigator.of(ctx).pop();
-            }
-          },
-          child: AlertDialog(
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const CircularProgressIndicator(),
-                const SizedBox(height: 16),
-                const Text('Opening browser for sign in...'),
-                const SizedBox(height: 8),
-                Text(
-                  'Complete sign in in your browser',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey[600],
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () {
-                    Navigator.pop(ctx);
-                    _authCompleter?.complete({
-                      'success': false,
-                      'message': 'Sign in cancelled',
-                    });
-                  },
-                  child: const Text('Cancel'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-
-      // Open in external browser
-      final uri = Uri.parse(authUrl);
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(
-          uri,
-          mode: LaunchMode.externalApplication,
-        );
-      } else {
-        Navigator.pop(context); // Close dialog
+      if (googleUser == null) {
+        // User cancelled the sign-in
+        _hideLoadingDialog(context);
+        debugPrint('❌ User cancelled Google Sign-In');
         return {
           'success': false,
-          'message': 'Could not open browser for authentication',
+          'message': 'Sign in cancelled',
         };
       }
 
-      // Wait for the deep link callback (with timeout)
-      final result = await _authCompleter!.future.timeout(
-        const Duration(minutes: 5),
-        onTimeout: () {
-          if (context.mounted) {
-            Navigator.of(context, rootNavigator: true).pop();
-          }
-          return {
-            'success': false,
-            'message': 'Authentication timed out',
-          };
-        },
-      );
+      debugPrint('✅ Google account selected: ${googleUser.email}');
 
-      // Close the dialog if still showing
-      if (context.mounted) {
-        try {
-          Navigator.of(context, rootNavigator: true).pop();
-        } catch (_) {}
+      // Get authentication details
+      final GoogleSignInAuthentication googleAuth = 
+          await googleUser.authentication;
+
+      final String? idToken = googleAuth.idToken;
+      final String? accessToken = googleAuth.accessToken;
+
+      debugPrint('📍 ID Token: ${idToken != null ? "Present" : "Missing"}');
+      debugPrint('📍 Access Token: ${accessToken != null ? "Present" : "Missing"}');
+
+      if (idToken == null) {
+        _hideLoadingDialog(context);
+        debugPrint('❌ No ID token received from Google');
+        return {
+          'success': false,
+          'message': 'Failed to get authentication token from Google',
+        };
       }
 
-      return result;
+      // Sign in to Supabase with the Google ID token
+      debugPrint('📍 Signing in to Supabase with Google ID token...');
+      
+      final response = await _supabase.auth.signInWithIdToken(
+        provider: OAuthProvider.google,
+        idToken: idToken,
+        accessToken: accessToken,
+      );
+
+      _hideLoadingDialog(context);
+
+      if (response.user != null) {
+        debugPrint('✅ Supabase authentication successful!');
+        debugPrint('📍 User ID: ${response.user!.id}');
+        debugPrint('📍 Email: ${response.user!.email}');
+
+        // Save session
+        await _sessionManager.saveSession(response.user!, response.session);
+
+        // Check if profile exists
+        final existingProfile = await _supabase
+            .from('user_profiles')
+            .select()
+            .eq('id', response.user!.id)
+            .maybeSingle();
+
+        if (existingProfile == null) {
+          // Create new profile
+          final profile = {
+            'id': response.user!.id,
+            'email': response.user!.email ?? googleUser.email,
+            'full_name': googleUser.displayName ?? 
+                        response.user!.userMetadata?['full_name'] ?? 
+                        response.user!.userMetadata?['name'] ?? 'User',
+            'display_name': googleUser.displayName ?? 
+                           response.user!.userMetadata?['full_name'] ?? 
+                           response.user!.userMetadata?['name'] ?? 'User',
+            'avatar_url': googleUser.photoUrl ?? 
+                         response.user!.userMetadata?['avatar_url'] ?? 
+                         response.user!.userMetadata?['picture'],
+            'auth_method': 'google',
+            'email_verified': true,
+            'phone_verified': false,
+            'profile_completed': false,
+            'created_at': DateTime.now().toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+          };
+
+          await _supabase.from('user_profiles').insert(profile);
+          debugPrint('✅ New profile created');
+
+          return {
+            'success': true,
+            'message': 'Account created successfully!',
+            'user': response.user,
+            'profile': profile,
+            'session': response.session,
+            'requiresBasicInfo': true,
+            'googleName': googleUser.displayName,
+            'googleEmail': googleUser.email,
+            'googlePhoto': googleUser.photoUrl,
+          };
+        } else {
+          debugPrint('✅ Existing profile found');
+
+          return {
+            'success': true,
+            'message': 'Signed in successfully!',
+            'user': response.user,
+            'profile': existingProfile,
+            'session': response.session,
+          };
+        }
+      } else {
+        debugPrint('❌ Supabase authentication failed');
+        return {
+          'success': false,
+          'message': 'Authentication failed',
+        };
+      }
     } on AuthException catch (e) {
+      _hideLoadingDialog(context);
       debugPrint('❌ Auth Error: ${e.message}');
       return {
         'success': false,
         'message': 'Google sign-in failed: ${e.message}',
       };
     } catch (e) {
+      _hideLoadingDialog(context);
       debugPrint('❌ Error: $e');
       return {
         'success': false,
@@ -548,302 +561,29 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  /// Handle OAuth callback from deep link
-  Future<void> _handleOAuthCallback(Uri uri) async {
-    debugPrint('🔍 Handling OAuth callback: $uri');
-
-    try {
-      String? accessToken;
-      String? refreshToken;
-      String? expiresIn;
-      String? expiresAt;
-      String? tokenType;
-      String? error;
-      String? errorDescription;
-      
-      // Check query parameters first (code flow)
-      final code = uri.queryParameters['code'];
-      error = uri.queryParameters['error'];
-      errorDescription = uri.queryParameters['error_description'];
-      
-      // Parse URL fragment (implicit flow)
-      if (uri.hasFragment && uri.fragment.isNotEmpty) {
-        debugPrint('📍 Found URL fragment');
-        
-        final fragmentParams = Uri.splitQueryString(uri.fragment);
-        
-        accessToken = fragmentParams['access_token'];
-        refreshToken = fragmentParams['refresh_token'];
-        expiresIn = fragmentParams['expires_in'];
-        expiresAt = fragmentParams['expires_at'];
-        tokenType = fragmentParams['token_type'] ?? 'bearer';
-        error = error ?? fragmentParams['error'];
-        errorDescription = errorDescription ?? fragmentParams['error_description'];
-        
-        debugPrint('📍 Access token: ${accessToken != null ? "Yes (${accessToken.length} chars)" : "No"}');
-        debugPrint('📍 Refresh token: ${refreshToken != null ? "Yes" : "No"}');
-        debugPrint('📍 Expires in: $expiresIn');
-      }
-      
-      // Handle implicit flow tokens
-      if (accessToken != null && refreshToken != null) {
-        debugPrint('✅ Both tokens received (implicit flow)');
-        
-        try {
-          // Decode the JWT to get user info
-          final parts = accessToken.split('.');
-          if (parts.length != 3) {
-            throw Exception('Invalid JWT format');
-          }
-          
-          // Decode the payload (second part of JWT)
-          String payload = parts[1];
-          // Add padding if needed for base64
-          while (payload.length % 4 != 0) {
-            payload += '=';
-          }
-          final normalized = base64Url.normalize(payload);
-          final decoded = utf8.decode(base64Url.decode(normalized));
-          final jwtPayload = jsonDecode(decoded) as Map<String, dynamic>;
-          
-          debugPrint('📍 JWT Payload decoded successfully');
-          debugPrint('📍 User ID: ${jwtPayload['sub']}');
-          debugPrint('📍 Email: ${jwtPayload['email']}');
-          
-          // Get user metadata from JWT
-          final userMetadata = jwtPayload['user_metadata'] as Map<String, dynamic>? ?? {};
-          final appMetadata = jwtPayload['app_metadata'] as Map<String, dynamic>? ?? {};
-          final email = jwtPayload['email'] as String?;
-          final userId = jwtPayload['sub'] as String;
-          
-          // Create the session JSON that Supabase expects
-          final expiresAtInt = int.tryParse(expiresAt ?? '') ?? 
-              (DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600);
-          
-          final sessionJson = jsonEncode({
-            'access_token': accessToken,
-            'refresh_token': refreshToken,
-            'token_type': tokenType,
-            'expires_in': int.tryParse(expiresIn ?? '3600') ?? 3600,
-            'expires_at': expiresAtInt,
-            'user': {
-              'id': userId,
-              'email': email,
-              'phone': jwtPayload['phone'] ?? '',
-              'user_metadata': userMetadata,
-              'app_metadata': appMetadata,
-              'aud': jwtPayload['aud'] ?? 'authenticated',
-              'role': jwtPayload['role'] ?? 'authenticated',
-              'email_confirmed_at': DateTime.now().toIso8601String(),
-              'created_at': DateTime.now().toIso8601String(),
-              'updated_at': DateTime.now().toIso8601String(),
-            }
-          });
-          
-          debugPrint('📍 Attempting to recover session...');
-          
-          // Try to recover the session
-          final response = await _supabase.auth.recoverSession(sessionJson);
-          
-          if (response.user != null && response.session != null) {
-            debugPrint('✅ Session recovered successfully!');
-            debugPrint('📍 User: ${response.user!.email}');
-            
-            // Save session using your SessionManager
-            await _sessionManager.saveSession(response.user!, response.session);
-            
-            await _handleSuccessfulAuth(response.user!);
-            return;
-          } else {
-            debugPrint('❌ recoverSession returned null user/session');
-          }
-        } catch (e) {
-          debugPrint('❌ Error recovering session: $e');
-          
-          // Fallback: Manually handle auth with decoded JWT data
-          try {
-            debugPrint('📍 Trying fallback: manual profile handling...');
-            
-            // Decode JWT again
-            final parts = accessToken.split('.');
-            String payload = parts[1];
-            while (payload.length % 4 != 0) {
-              payload += '=';
-            }
-            final decoded = utf8.decode(base64Url.decode(base64Url.normalize(payload)));
-            final jwtPayload = jsonDecode(decoded) as Map<String, dynamic>;
-            
-            final userId = jwtPayload['sub'] as String;
-            final email = jwtPayload['email'] as String?;
-            final userMetadata = jwtPayload['user_metadata'] as Map<String, dynamic>? ?? {};
-            
-            // Store tokens in secure storage for session persistence
-            await _secureStorage.write(key: _accessTokenKey, value: accessToken);
-            await _secureStorage.write(key: _refreshTokenKey, value: refreshToken);
-            await _secureStorage.write(key: 'travel_buddy_user_id', value: userId);
-            await _secureStorage.write(key: 'travel_buddy_email', value: email ?? '');
-            await _secureStorage.write(key: 'travel_buddy_session', value: accessToken);
-            
-            debugPrint('✅ Tokens saved to secure storage');
-            
-            // Check if profile exists
-            final existing = await _supabase
-                .from('user_profiles')
-                .select()
-                .eq('id', userId)
-                .maybeSingle();
-
-            if (existing == null) {
-              // Create basic profile from OAuth data
-              final profile = {
-                'id': userId,
-                'email': email,
-                'full_name': userMetadata['full_name'] ?? userMetadata['name'] ?? 'User',
-                'display_name': userMetadata['full_name'] ?? userMetadata['name'] ?? 'User',
-                'avatar_url': userMetadata['avatar_url'] ?? userMetadata['picture'],
-                'auth_method': 'google',
-                'email_verified': true,
-                'phone_verified': false,
-                'profile_completed': false,
-                'created_at': DateTime.now().toIso8601String(),
-                'updated_at': DateTime.now().toIso8601String(),
-              };
-
-              await _supabase.from('user_profiles').insert(profile);
-              debugPrint('✅ Profile created from Google OAuth');
-
-              _authCompleter?.complete({
-                'success': true,
-                'message': 'Google account created successfully!',
-                'userId': userId,
-                'profile': profile,
-                'requiresBasicInfo': true,
-                'googleName': userMetadata['full_name'] ?? userMetadata['name'],
-                'googleEmail': email,
-                'googlePhoto': userMetadata['avatar_url'] ?? userMetadata['picture'],
-              });
-            } else {
-              debugPrint('✅ Existing profile found');
-              
-              _authCompleter?.complete({
-                'success': true,
-                'message': 'Signed in with Google successfully!',
-                'userId': userId,
-                'profile': existing,
-              });
-            }
-            return;
-          } catch (fallbackError) {
-            debugPrint('❌ Fallback also failed: $fallbackError');
-          }
-        }
-      }
-      
-      // Handle code flow
-      if (code != null && code.isNotEmpty) {
-        debugPrint('✅ Auth code received (code flow)');
-        
-        try {
-          await _supabase.auth.exchangeCodeForSession(code);
-          
-          final user = _supabase.auth.currentUser;
-          if (user != null) {
-            debugPrint('✅ OAuth successful via code exchange');
-            await _sessionManager.saveSession(user, _supabase.auth.currentSession);
-            await _handleSuccessfulAuth(user);
-            return;
-          }
-        } catch (e) {
-          debugPrint('❌ Error exchanging code: $e');
-        }
-      }
-      
-      // Handle error
-      if (error != null) {
-        debugPrint('❌ OAuth error: $error - $errorDescription');
-        _authCompleter?.complete({
-          'success': false,
-          'message': errorDescription ?? error,
-        });
-        return;
-      }
-      
-      // No valid auth found
-      debugPrint('❌ Could not authenticate with received tokens');
-      _authCompleter?.complete({
-        'success': false,
-        'message': 'Authentication failed - could not process credentials',
-      });
-      
-    } catch (e) {
-      debugPrint('❌ Error handling OAuth callback: $e');
-      _authCompleter?.complete({
-        'success': false,
-        'message': 'Failed to complete sign-in: $e',
-      });
-    }
+  /// Show loading dialog
+  void _showLoadingDialog(BuildContext context, String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        content: Row(
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(width: 20),
+            Expanded(child: Text(message)),
+          ],
+        ),
+      ),
+    );
   }
 
-  /// Handle successful authentication
-  Future<void> _handleSuccessfulAuth(User user) async {
-    try {
-      debugPrint('📍 Processing successful auth for: ${user.email}');
-      
-      // Check if profile exists
-      final existing = await _supabase
-          .from('user_profiles')
-          .select()
-          .eq('id', user.id)
-          .maybeSingle();
-
-      if (existing == null) {
-        // Create basic profile from OAuth data
-        final profile = {
-          'id': user.id,
-          'email': user.email,
-          'full_name': user.userMetadata?['full_name'] ?? 
-                      user.userMetadata?['name'] ?? 'User',
-          'display_name': user.userMetadata?['full_name'] ?? 
-                         user.userMetadata?['name'] ?? 'User',
-          'avatar_url': user.userMetadata?['avatar_url'] ?? 
-                       user.userMetadata?['picture'],
-          'auth_method': 'google',
-          'email_verified': true,
-          'phone_verified': false,
-          'profile_completed': false,
-          'created_at': DateTime.now().toIso8601String(),
-          'updated_at': DateTime.now().toIso8601String(),
-        };
-
-        await _supabase.from('user_profiles').insert(profile);
-        debugPrint('✅ Profile created from Google OAuth');
-
-        _authCompleter?.complete({
-          'success': true,
-          'message': 'Google account created successfully!',
-          'user': user,
-          'profile': profile,
-          'requiresBasicInfo': true,
-          'googleName': user.userMetadata?['full_name'] ?? user.userMetadata?['name'],
-          'googleEmail': user.email,
-          'googlePhoto': user.userMetadata?['avatar_url'] ?? user.userMetadata?['picture'],
-        });
-      } else {
-        debugPrint('✅ Existing profile found');
-        
-        _authCompleter?.complete({
-          'success': true,
-          'message': 'Signed in with Google successfully!',
-          'user': user,
-          'profile': existing,
-        });
-      }
-    } catch (e) {
-      debugPrint('❌ Error in _handleSuccessfulAuth: $e');
-      _authCompleter?.complete({
-        'success': false,
-        'message': 'Failed to complete profile setup: $e',
-      });
+  /// Hide loading dialog
+  void _hideLoadingDialog(BuildContext context) {
+    if (context.mounted) {
+      try {
+        Navigator.of(context, rootNavigator: true).pop();
+      } catch (_) {}
     }
   }
 
@@ -947,11 +687,13 @@ class SimplifiedUnifiedAuthService {
 
   Future<void> signOut() async {
     try {
+      // Sign out from Google
+      await _googleSignIn.signOut();
+      
+      // Sign out from Supabase
       await _supabase.auth.signOut();
       await _sessionManager.clearSession();
-      // Also clear OAuth tokens
-      await _secureStorage.delete(key: _accessTokenKey);
-      await _secureStorage.delete(key: _refreshTokenKey);
+      
       debugPrint('✅ User signed out successfully');
     } catch (e) {
       debugPrint('❌ Error signing out: $e');
