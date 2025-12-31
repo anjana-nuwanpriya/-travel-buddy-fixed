@@ -396,16 +396,29 @@ class _SignUpBasicInfoScreenState extends State<SignUpBasicInfoScreen> {
       Map<String, dynamic> result = {};
 
       if (authMethod == 'phone') {
-        // Verify OTP and create profile (OTP already verified in previous screen)
-        result = await _authService.verifySignUpOTPAndCreateProfile(
-          phoneNumber: _phoneController.text,
-          otp: widget.authData['otp'] ?? '',
-          fullName: _fullNameController.text,
-          email: _emailController.text,
-          dateOfBirth: _dateOfBirth!,
-          gender: _gender,
-          photoUrl: _photoUrl,
-        );
+        // ✅ FIX: Check if OTP was already verified on phone screen
+        if (widget.authData['phoneVerified'] == true) {
+          // OTP already verified - just create profile (NO re-verification)
+          result = await _authService.createPhoneUserProfile(
+            phoneNumber: _phoneController.text,
+            fullName: _fullNameController.text,
+            email: _emailController.text,
+            dateOfBirth: _dateOfBirth!,
+            gender: _gender,
+            photoUrl: _photoUrl,
+          );
+        } else {
+          // Old flow - verify OTP and create profile
+          result = await _authService.verifySignUpOTPAndCreateProfile(
+            phoneNumber: _phoneController.text,
+            otp: widget.authData['otp'] ?? '',
+            fullName: _fullNameController.text,
+            email: _emailController.text,
+            dateOfBirth: _dateOfBirth!,
+            gender: _gender,
+            photoUrl: _photoUrl,
+          );
+        }
       } else if (authMethod == 'email') {
         // Complete email signup
         result = await _authService.completeEmailSignUp(
@@ -445,7 +458,7 @@ class _SignUpBasicInfoScreenState extends State<SignUpBasicInfoScreen> {
 
       if (!mounted) return;
 
-      if (result['success']) {
+      if (result['success'] == true) {
         Navigator.pushReplacementNamed(context, '/home');
       } else {
         setState(() {

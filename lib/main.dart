@@ -35,40 +35,26 @@ import 'screens/auth/4_email_verification_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // ✅ Only initialize Supabase here - check session later
   try {
-    // ✅ Step 1: Initialize Supabase
     await SupabaseConfig.initialize(
       url: 'https://qgeefajkplektjzroxex.supabase.co',
       anonKey:
           'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFnZWVmYWprcGxla3RqenJveGV4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk0ODU4NDYsImV4cCI6MjA3NTA2MTg0Nn0.MZPfdHQQqPArJRYygNbiSAgyDkiWe8-f7oTqCgolZuU',
     );
     debugPrint('✅ Supabase initialized');
-
-    // ✅ Step 2: Initialize Auth Service (for deep link handling)
-    await SimplifiedUnifiedAuthService().initialize();
-    debugPrint('✅ Auth Service initialized');
-
-    // Check for existing session
-    final sessionManager = SessionManager();
-    final hasSession = await sessionManager.hasValidSession();
-    debugPrint('📍 Has valid session: $hasSession');
-
-    runApp(TravelBuddyApp(initialRoute: hasSession ? '/home' : '/welcome'));
   } catch (e) {
-    debugPrint('❌ Failed to initialize app: $e');
-    runApp(const TravelBuddyApp(initialRoute: '/welcome'));
+    debugPrint('❌ Failed to initialize Supabase: $e');
   }
+
+  // ✅ Run app immediately - don't wait for session check
+  runApp(const TravelBuddyApp());
 }
 
 // ==================== MAIN APP ====================
 
 class TravelBuddyApp extends StatelessWidget {
-  final String initialRoute;
-
-  const TravelBuddyApp({
-    super.key,
-    this.initialRoute = '/welcome',
-  });
+  const TravelBuddyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -99,7 +85,8 @@ class TravelBuddyApp extends StatelessWidget {
             ),
           ),
         ),
-        home: _buildHome(),
+        // ✅ Use SplashScreen as home - it handles session check
+        home: const SplashScreen(),
         debugShowCheckedModeBanner: false,
         routes: {
           // ==================== ORIGINAL ROUTES ====================
@@ -147,45 +134,93 @@ class TravelBuddyApp extends StatelessWidget {
       ),
     );
   }
+}
 
-  /// Build initial home screen based on session status
-  Widget _buildHome() {
-    return FutureBuilder<bool>(
-      future: SessionManager().hasValidSession(),
-      builder: (context, snapshot) {
-        // While checking session
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return Scaffold(
-            backgroundColor: Colors.white,
-            body: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: const [
-                  CircularProgressIndicator(
-                    color: AppColors.primary,
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    'Loading your session...',
-                    style: TextStyle(
-                      color: AppColors.textSecondary,
-                      fontSize: 14,
-                    ),
-                  ),
-                ],
+// ==================== SPLASH SCREEN - Fast Loading ====================
+
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
+
+  @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // ✅ Check session AFTER first frame renders (non-blocking)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initializeAndNavigate();
+    });
+  }
+
+  Future<void> _initializeAndNavigate() async {
+    try {
+      // Initialize auth service
+      await SimplifiedUnifiedAuthService().initialize();
+      debugPrint('✅ Auth Service initialized');
+
+      // Check session
+      final sessionManager = SessionManager();
+      final hasSession = await sessionManager.hasValidSession();
+      debugPrint('📍 Has valid session: $hasSession');
+
+      if (!mounted) return;
+
+      // Navigate based on session
+      if (hasSession) {
+        Navigator.pushReplacementNamed(context, '/home');
+      } else {
+        Navigator.pushReplacementNamed(context, '/welcome');
+      }
+    } catch (e) {
+      debugPrint('❌ Error during initialization: $e');
+      if (mounted) {
+        Navigator.pushReplacementNamed(context, '/welcome');
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.white,
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // App logo or icon
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: AppColors.primary,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: const Icon(
+                Icons.directions_car,
+                color: Colors.white,
+                size: 40,
               ),
             ),
-          );
-        }
-
-        // If error or no session, show welcome
-        if (!snapshot.hasData || !snapshot.data!) {
-          return const welcome_screen.WelcomeScreen();
-        }
-
-        // If valid session, show home
-        return const MainScreen();
-      },
+            const SizedBox(height: 24),
+            const Text(
+              'Travel Buddy',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: AppColors.textPrimary,
+              ),
+            ),
+            const SizedBox(height: 32),
+            const CircularProgressIndicator(
+              color: AppColors.primary,
+              strokeWidth: 2,
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

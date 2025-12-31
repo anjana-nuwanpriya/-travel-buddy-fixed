@@ -5,9 +5,11 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'dart:async';
 import '../config/supabase_config.dart';
 import 'session_manager.dart';
+import 'textlk_sms_service.dart';
 
-/// Unified Auth Service with Native Google Sign-In
-/// Provides the best UX for mobile apps - native account picker, no browser redirect
+/// Unified Auth Service with Native Google Sign-In + Text.lk SMS
+/// - Google/Apple/Email auth: unchanged (uses Supabase)
+/// - Phone auth: now uses Text.lk SMS Gateway
 class SimplifiedUnifiedAuthService {
   static final SimplifiedUnifiedAuthService _instance =
       SimplifiedUnifiedAuthService._internal();
@@ -20,49 +22,51 @@ class SimplifiedUnifiedAuthService {
 
   final SupabaseClient _supabase = SupabaseConfig.client;
   final SessionManager _sessionManager = SessionManager();
+  final TextLkSmsService _smsService = TextLkSmsService();
   
   // ✅ Native Google Sign-In configuration
-  // Use your Web Client ID from Google Cloud Console
-  // (NOT the Android client ID - use the Web one for Supabase)
   static const String _googleWebClientId = 
       '187097738490-9ovt2i9c26tvgq187k6g08srr49fc1qk.apps.googleusercontent.com';
   
-  // For iOS, you also need the iOS client ID
   static const String _googleIOSClientId = 
-      '187097738490-XXXXXXXXXXXXXXXXXXXXXXXXXXXX.apps.googleusercontent.com'; // Replace with your iOS client ID
+      '187097738490-XXXXXXXXXXXXXXXXXXXXXXXXXXXX.apps.googleusercontent.com';
   
   late final GoogleSignIn _googleSignIn;
+
+  // Expose SMS service for UI formatting
+  TextLkSmsService get smsService => _smsService;
 
   /// Initialize the auth service (call this in main.dart after Supabase init)
   Future<void> initialize() async {
     debugPrint('🔐 Initializing Auth Service...');
     
-    // Initialize Google Sign-In
     _googleSignIn = GoogleSignIn(
-      // Use web client ID for server auth code
       serverClientId: _googleWebClientId,
-      scopes: [
-        'email',
-        'profile',
-      ],
+      scopes: ['email', 'profile'],
     );
     
     debugPrint('✅ Auth Service initialized');
   }
 
-  /// Dispose resources
-  void dispose() {
-    // No cleanup needed for native Google Sign-In
-  }
+  void dispose() {}
 
-  // ==================== SIGN IN - PHONE ====================
+  // ==================== SIGN IN - PHONE (Text.lk) ====================
 
-  /// SIGN IN - Phone (Step 1: Send OTP)
+  /// SIGN IN - Phone (Step 1: Send OTP via Text.lk)
   Future<Map<String, dynamic>> sendSignInOTP(String phoneNumber) async {
     try {
       debugPrint('📱 [SIGN IN] Sending OTP to: $phoneNumber');
 
-      final existingUser = await _supabase
+      final formattedPhone = _smsService.formatPhoneNumber(phoneNumber);
+
+      // Check if phone is registered (check both formats)
+      var existingUser = await _supabase
+          .from('user_profiles')
+          .select()
+          .eq('phone', formattedPhone)
+          .maybeSingle();
+
+      existingUser ??= await _supabase
           .from('user_profiles')
           .select()
           .eq('phone', phoneNumber)
@@ -77,27 +81,20 @@ class SimplifiedUnifiedAuthService {
         };
       }
 
-      await _supabase.auth.signInWithOtp(
-        phone: phoneNumber,
-        shouldCreateUser: false,
+      // Send OTP via Text.lk
+      final result = await _smsService.sendOtp(
+        phoneNumber: phoneNumber,
+        purpose: 'signin',
       );
 
-      debugPrint('✅ OTP sent');
-      return {
-        'success': true,
-        'message': 'OTP sent successfully',
-        'phoneNumber': phoneNumber,
-      };
-    } on AuthException catch (e) {
-      debugPrint('❌ Auth Error: ${e.message}');
-      return {'success': false, 'message': e.message};
+      return result;
     } catch (e) {
       debugPrint('❌ Error: $e');
       return {'success': false, 'message': 'Failed to send OTP: $e'};
     }
   }
 
-  /// SIGN IN - Phone (Step 2: Verify OTP)
+  /// SIGN IN - Phone (Step 2: Verify OTP via Text.lk)
   Future<Map<String, dynamic>> verifySignInOTP(
     String phoneNumber,
     String otp,
@@ -105,43 +102,254 @@ class SimplifiedUnifiedAuthService {
     try {
       debugPrint('🔐 [SIGN IN] Verifying OTP');
 
-      final response = await _supabase.auth.verifyOTP(
-        phone: phoneNumber,
-        token: otp,
-        type: OtpType.sms,
+      // Verify OTP via Text.lk service
+      final verifyResult = await _smsService.verifyOtp(
+        phoneNumber: phoneNumber,
+        otpCode: otp,
       );
 
-      if (response.user != null) {
-        debugPrint('✅ OTP verified - SIGN IN SUCCESS');
-
-        final profile = await _supabase
-            .from('user_profiles')
-            .select()
-            .eq('id', response.user!.id)
-            .maybeSingle();
-
-        await _sessionManager.saveSession(response.user!, response.session);
-
-        return {
-          'success': true,
-          'message': 'Signed in successfully',
-          'user': response.user,
-          'profile': profile,
-          'session': response.session,
-        };
-      } else {
-        return {'success': false, 'message': 'Invalid OTP'};
+      if (!verifyResult['success']) {
+        return verifyResult;
       }
-    } on AuthException catch (e) {
-      debugPrint('❌ Auth Error: ${e.message}');
-      return {'success': false, 'message': e.message};
+
+      // OTP verified - get user profile
+      final formattedPhone = _smsService.formatPhoneNumber(phoneNumber);
+      
+      var profile = await _supabase
+          .from('user_profiles')
+          .select()
+          .eq('phone', formattedPhone)
+          .maybeSingle();
+      
+      profile ??= await _supabase
+          .from('user_profiles')
+          .select()
+          .eq('phone', phoneNumber)
+          .maybeSingle();
+
+      if (profile == null) {
+        return {
+          'success': false,
+          'message': 'User profile not found',
+        };
+      }
+
+      // Save session for phone auth
+      await _sessionManager.savePhoneSession(
+        userId: profile['id'],
+        phone: formattedPhone,
+      );
+
+      debugPrint('✅ OTP verified - SIGN IN SUCCESS');
+      return {
+        'success': true,
+        'message': 'Signed in successfully',
+        'profile': profile,
+        'userId': profile['id'],
+      };
     } catch (e) {
       debugPrint('❌ Error: $e');
       return {'success': false, 'message': 'Failed to verify OTP: $e'};
     }
   }
 
-  // ==================== SIGN IN - EMAIL ====================
+  /// Resend Sign In OTP
+  Future<Map<String, dynamic>> resendSignInOTP(String phoneNumber) async {
+    return _smsService.resendOtp(phoneNumber: phoneNumber, purpose: 'signin');
+  }
+
+  // ==================== SIGN UP - PHONE (Text.lk) ====================
+
+  /// SIGN UP - Phone (Step 1: Send OTP via Text.lk)
+  Future<Map<String, dynamic>> sendSignUpOTP(String phoneNumber) async {
+    try {
+      debugPrint('📱 [SIGN UP] Sending OTP to: $phoneNumber');
+
+      final formattedPhone = _smsService.formatPhoneNumber(phoneNumber);
+
+      // Check if phone already registered
+      var existingUser = await _supabase
+          .from('user_profiles')
+          .select()
+          .eq('phone', formattedPhone)
+          .maybeSingle();
+
+      existingUser ??= await _supabase
+          .from('user_profiles')
+          .select()
+          .eq('phone', phoneNumber)
+          .maybeSingle();
+
+      if (existingUser != null) {
+        debugPrint('❌ Phone already registered');
+        return {
+          'success': false,
+          'message': 'Phone already registered. Please sign in instead.',
+          'accountExists': true,
+        };
+      }
+
+      // Send OTP via Text.lk
+      final result = await _smsService.sendOtp(
+        phoneNumber: phoneNumber,
+        purpose: 'signup',
+      );
+
+      return result;
+    } catch (e) {
+      debugPrint('❌ Error: $e');
+      return {'success': false, 'message': 'Failed to send OTP: $e'};
+    }
+  }
+
+  /// SIGN UP - Phone (Step 2: Verify OTP + Save basic info)
+  /// This is the ORIGINAL method signature - kept for backward compatibility
+  Future<Map<String, dynamic>> verifySignUpOTPAndCreateProfile({
+    required String phoneNumber,
+    required String otp,
+    required String fullName,
+    required String email,
+    required DateTime dateOfBirth,
+    String? gender,
+    String? photoUrl,
+  }) async {
+    try {
+      debugPrint('🔐 [SIGN UP] Verifying OTP and creating profile');
+
+      // Verify OTP via Text.lk
+      final verifyResult = await _smsService.verifyOtp(
+        phoneNumber: phoneNumber,
+        otpCode: otp,
+      );
+
+      if (!verifyResult['success']) {
+        return verifyResult;
+      }
+
+      // Create user ID (since we're not using Supabase Auth for phone)
+      final userId = DateTime.now().millisecondsSinceEpoch.toString() + 
+                    _smsService.formatPhoneNumber(phoneNumber).substring(2);
+
+      final formattedPhone = _smsService.formatPhoneNumber(phoneNumber);
+
+      final profile = {
+        'id': userId,
+        'phone': formattedPhone,
+        'email': email,
+        'full_name': fullName,
+        'display_name': fullName,
+        'avatar_url': photoUrl,
+        'date_of_birth': dateOfBirth.toIso8601String().split('T')[0],
+        'gender': gender,
+        'auth_method': 'phone',
+        'phone_verified': true,
+        'email_verified': false,
+        'profile_completed': false,
+        'signup_completed_at': DateTime.now().toIso8601String(),
+        'created_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
+      };
+
+      await _supabase.from('user_profiles').insert(profile);
+
+      await _sessionManager.savePhoneSession(
+        userId: userId,
+        phone: formattedPhone,
+      );
+
+      debugPrint('✅ SIGN UP SUCCESS');
+      return {
+        'success': true,
+        'message': 'Account created successfully',
+        'profile': profile,
+        'userId': userId,
+      };
+    } catch (e) {
+      debugPrint('❌ Error: $e');
+      return {'success': false, 'message': 'Sign up failed: $e'};
+    }
+  }
+
+  /// Resend Sign Up OTP
+  Future<Map<String, dynamic>> resendSignUpOTP(String phoneNumber) async {
+    return _smsService.resendOtp(phoneNumber: phoneNumber, purpose: 'signup');
+  }
+
+  
+
+  /// Create Phone User Profile (called AFTER OTP is already verified)
+  /// This method does NOT re-verify OTP - use when phoneVerified: true is passed
+  Future<Map<String, dynamic>> createPhoneUserProfile({
+    required String phoneNumber,
+    required String fullName,
+    required String email,
+    required DateTime dateOfBirth,
+    String? gender,
+    String? photoUrl,
+  }) async {
+    try {
+      debugPrint('📝 [SIGN UP] Creating profile for verified phone user');
+
+      final formattedPhone = _smsService.formatPhoneNumber(phoneNumber);
+
+      // Check if phone already exists
+      var existingUser = await _supabase
+          .from('user_profiles')
+          .select()
+          .eq('phone', formattedPhone)
+          .maybeSingle();
+
+      if (existingUser != null) {
+        return {
+          'success': false,
+          'message': 'Phone already registered',
+          'accountExists': true,
+        };
+      }
+
+      // Generate user ID for phone auth (no Supabase Auth user)
+      final userId = 'phone_${DateTime.now().millisecondsSinceEpoch}_${formattedPhone.substring(2, 7)}';
+
+      final profile = {
+        'id': userId,
+        'phone': formattedPhone,
+        'email': email.isNotEmpty ? email : null,
+        'full_name': fullName,
+        'display_name': fullName,
+        'avatar_url': photoUrl,
+        'date_of_birth': dateOfBirth.toIso8601String().split('T')[0],
+        'gender': gender,
+        'auth_method': 'phone',
+        'phone_verified': true,
+        'email_verified': false,
+        'profile_completed': false,
+        'signup_completed_at': DateTime.now().toIso8601String(),
+        'created_at': DateTime.now().toIso8601String(),
+        'updated_at': DateTime.now().toIso8601String(),
+      };
+
+      await _supabase.from('user_profiles').insert(profile);
+
+      // Save phone session
+      await _sessionManager.savePhoneSession(
+        userId: userId,
+        phone: formattedPhone,
+      );
+
+      debugPrint('✅ Phone user profile created successfully');
+      return {
+        'success': true,
+        'message': 'Account created successfully',
+        'profile': profile,
+        'userId': userId,
+      };
+    } catch (e) {
+      debugPrint('❌ Error creating phone profile: $e');
+      return {'success': false, 'message': 'Failed to create account: $e'};
+    }
+  }
+
+  // ==================== SIGN IN - EMAIL (UNCHANGED) ====================
 
   /// SIGN IN - Email & Password
   Future<Map<String, dynamic>> signInWithEmail({
@@ -203,111 +411,7 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  // ==================== SIGN UP - PHONE ====================
-
-  /// SIGN UP - Phone (Step 1: Send OTP)
-  Future<Map<String, dynamic>> sendSignUpOTP(String phoneNumber) async {
-    try {
-      debugPrint('📱 [SIGN UP] Sending OTP to: $phoneNumber');
-
-      final existingUser = await _supabase
-          .from('user_profiles')
-          .select()
-          .eq('phone', phoneNumber)
-          .maybeSingle();
-
-      if (existingUser != null) {
-        debugPrint('❌ Phone already registered');
-        return {
-          'success': false,
-          'message': 'Phone already registered. Please sign in instead.',
-          'accountExists': true,
-        };
-      }
-
-      await _supabase.auth.signInWithOtp(
-        phone: phoneNumber,
-        shouldCreateUser: true,
-      );
-
-      debugPrint('✅ OTP sent');
-      return {
-        'success': true,
-        'message': 'OTP sent successfully',
-        'phoneNumber': phoneNumber,
-      };
-    } on AuthException catch (e) {
-      debugPrint('❌ Auth Error: ${e.message}');
-      return {'success': false, 'message': e.message};
-    } catch (e) {
-      debugPrint('❌ Error: $e');
-      return {'success': false, 'message': 'Failed to send OTP: $e'};
-    }
-  }
-
-  /// SIGN UP - Phone (Step 2: Verify OTP + Save basic info)
-  Future<Map<String, dynamic>> verifySignUpOTPAndCreateProfile({
-    required String phoneNumber,
-    required String otp,
-    required String fullName,
-    required String email,
-    required DateTime dateOfBirth,
-    String? gender,
-    String? photoUrl,
-  }) async {
-    try {
-      debugPrint('🔐 [SIGN UP] Verifying OTP and creating profile');
-
-      final response = await _supabase.auth.verifyOTP(
-        phone: phoneNumber,
-        token: otp,
-        type: OtpType.sms,
-      );
-
-      if (response.user == null) {
-        return {'success': false, 'message': 'Invalid OTP'};
-      }
-
-      final profile = {
-        'id': response.user!.id,
-        'phone': phoneNumber,
-        'email': email,
-        'full_name': fullName,
-        'display_name': fullName,
-        'avatar_url': photoUrl,
-        'date_of_birth': dateOfBirth.toIso8601String(),
-        'gender': gender,
-        'auth_method': 'phone',
-        'phone_verified': true,
-        'email_verified': false,
-        'profile_completed': false,
-        'signup_completed_at': DateTime.now().toIso8601String(),
-        'created_at': DateTime.now().toIso8601String(),
-        'updated_at': DateTime.now().toIso8601String(),
-      };
-
-      await _supabase.from('user_profiles').insert(profile);
-
-      await _sessionManager.saveSession(response.user!, response.session);
-
-      debugPrint('✅ SIGN UP SUCCESS');
-      return {
-        'success': true,
-        'message': 'Account created successfully',
-        'user': response.user,
-        'profile': profile,
-        'session': response.session,
-      };
-    } on AuthException catch (e) {
-      debugPrint('❌ Auth Error: ${e.message}');
-      return {'success': false, 'message': e.message};
-    } catch (e) {
-      debugPrint('❌ Error: $e');
-      return {'success': false, 'message': 'Sign up failed: $e'};
-    }
-  }
-
-  // ==================== SIGN UP - EMAIL ====================
+  // ==================== SIGN UP - EMAIL (UNCHANGED) ====================
 
   /// SIGN UP - Email (Step 1: Create account)
   Future<Map<String, dynamic>> signUpWithEmail({
@@ -418,23 +522,18 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  // ==================== NATIVE GOOGLE SIGN-IN ====================
+  // ==================== NATIVE GOOGLE SIGN-IN (UNCHANGED) ====================
   
   /// ✅ NATIVE Google Sign-In - Best UX!
-  /// Shows the native Google account picker (same as YouTube, Gmail, etc.)
-  /// No browser redirect, seamless experience
   Future<Map<String, dynamic>> signUpWithGoogle(BuildContext context) async {
     try {
       debugPrint('🔍 [GOOGLE] Starting native Google Sign-In...');
 
-      // Show loading indicator
       _showLoadingDialog(context, 'Signing in with Google...');
 
-      // Trigger native Google Sign-In
       final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
 
       if (googleUser == null) {
-        // User cancelled the sign-in
         _hideLoadingDialog(context);
         debugPrint('❌ User cancelled Google Sign-In');
         return {
@@ -445,7 +544,6 @@ class SimplifiedUnifiedAuthService {
 
       debugPrint('✅ Google account selected: ${googleUser.email}');
 
-      // Get authentication details
       final GoogleSignInAuthentication googleAuth = 
           await googleUser.authentication;
 
@@ -464,7 +562,6 @@ class SimplifiedUnifiedAuthService {
         };
       }
 
-      // Sign in to Supabase with the Google ID token
       debugPrint('📍 Signing in to Supabase with Google ID token...');
       
       final response = await _supabase.auth.signInWithIdToken(
@@ -480,10 +577,8 @@ class SimplifiedUnifiedAuthService {
         debugPrint('📍 User ID: ${response.user!.id}');
         debugPrint('📍 Email: ${response.user!.email}');
 
-        // Save session
         await _sessionManager.saveSession(response.user!, response.session);
 
-        // Check if profile exists
         final existingProfile = await _supabase
             .from('user_profiles')
             .select()
@@ -491,7 +586,6 @@ class SimplifiedUnifiedAuthService {
             .maybeSingle();
 
         if (existingProfile == null) {
-          // Create new profile
           final profile = {
             'id': response.user!.id,
             'email': response.user!.email ?? googleUser.email,
@@ -561,7 +655,6 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  /// Show loading dialog
   void _showLoadingDialog(BuildContext context, String message) {
     showDialog(
       context: context,
@@ -578,7 +671,6 @@ class SimplifiedUnifiedAuthService {
     );
   }
 
-  /// Hide loading dialog
   void _hideLoadingDialog(BuildContext context) {
     if (context.mounted) {
       try {
@@ -587,7 +679,7 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  // ==================== SIGN UP - APPLE ====================
+  // ==================== SIGN UP - APPLE (UNCHANGED) ====================
 
   Future<Map<String, dynamic>> signUpWithApple() async {
     try {
@@ -683,17 +775,13 @@ class SimplifiedUnifiedAuthService {
     }
   }
 
-  // ==================== COMMON METHODS ====================
+  // ==================== COMMON METHODS (UNCHANGED) ====================
 
   Future<void> signOut() async {
     try {
-      // Sign out from Google
       await _googleSignIn.signOut();
-      
-      // Sign out from Supabase
       await _supabase.auth.signOut();
       await _sessionManager.clearSession();
-      
       debugPrint('✅ User signed out successfully');
     } catch (e) {
       debugPrint('❌ Error signing out: $e');

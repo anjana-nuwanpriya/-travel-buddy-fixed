@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 import '../../utils/colors.dart';
 import '../../services/simplified_unified_auth_service.dart';
 
 /// Phone Signup Screen (2 steps)
 /// Step 1: Enter phone number
 /// Step 2: Verify OTP
+/// Then navigates to basic info screen
 class SignUpPhoneScreen extends StatefulWidget {
   const SignUpPhoneScreen({super.key});
 
@@ -17,10 +19,35 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
   final _phoneController = TextEditingController();
   final _otpController = TextEditingController();
   
-  bool _isPhoneStep = true; // true = enter phone, false = verify OTP
+  bool _isPhoneStep = true;
   bool _isLoading = false;
   String? _errorMessage;
+  String? _successMessage;
   String? _phoneNumber;
+  
+  // Resend OTP timer
+  int _resendCountdown = 0;
+  Timer? _resendTimer;
+
+  @override
+  void dispose() {
+    _phoneController.dispose();
+    _otpController.dispose();
+    _resendTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startResendTimer() {
+    _resendCountdown = 60;
+    _resendTimer?.cancel();
+    _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_resendCountdown > 0) {
+        setState(() => _resendCountdown--);
+      } else {
+        timer.cancel();
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -31,7 +58,18 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
         elevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios, size: 20),
-          onPressed: () => Navigator.pop(context),
+          onPressed: () {
+            if (!_isPhoneStep) {
+              setState(() {
+                _isPhoneStep = true;
+                _errorMessage = null;
+                _successMessage = null;
+                _otpController.clear();
+              });
+            } else {
+              Navigator.pop(context);
+            }
+          },
         ),
         title: Text(_isPhoneStep ? 'Enter Phone' : 'Verify OTP'),
       ),
@@ -59,7 +97,7 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
                 Text(
                   _isPhoneStep
                       ? 'We\'ll send you an OTP to verify'
-                      : 'Check your SMS messages',
+                      : 'Code sent to ${_authService.smsService.getDisplayNumber(_phoneController.text)}',
                   style: TextStyle(
                     fontSize: 14,
                     color: AppColors.textSecondary,
@@ -70,13 +108,31 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
                 const SizedBox(height: 40),
 
                 if (_isPhoneStep) ...[
-                  // Phone input
+                  // Phone input with Sri Lanka prefix
                   TextField(
                     controller: _phoneController,
                     keyboardType: TextInputType.phone,
                     decoration: InputDecoration(
-                      hintText: '+1 (555) 123-4567',
+                      hintText: '7X XXX XXXX',
                       labelText: 'Phone Number',
+                      prefixIcon: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Text('🇱🇰', style: TextStyle(fontSize: 20)),
+                            const SizedBox(width: 8),
+                            Text(
+                              '+94',
+                              style: TextStyle(
+                                fontSize: 16,
+                                color: Colors.grey.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      prefixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -98,20 +154,63 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
                       ),
                       counterText: '',
                     ),
+                    onChanged: (value) {
+                      if (value.length == 6) {
+                        _verifyOTP();
+                      }
+                    },
                   ),
                   
                   const SizedBox(height: 20),
                   
-                  Text(
-                    'Resend OTP in 30s',
-                    style: TextStyle(
-                      color: Colors.grey.shade600,
-                      fontSize: 13,
+                  // Resend OTP
+                  _resendCountdown > 0
+                      ? Text(
+                          'Resend OTP in ${_resendCountdown}s',
+                          style: TextStyle(
+                            color: Colors.grey.shade600,
+                            fontSize: 13,
+                          ),
+                          textAlign: TextAlign.center,
+                        )
+                      : TextButton(
+                          onPressed: _isLoading ? null : _resendOTP,
+                          child: Text(
+                            'Resend OTP',
+                            style: TextStyle(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                ],
+
+                // Success message
+                if (_successMessage != null) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.green.shade50,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.green.shade200),
                     ),
-                    textAlign: TextAlign.center,
+                    child: Row(
+                      children: [
+                        Icon(Icons.check_circle, color: Colors.green.shade700, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _successMessage!,
+                            style: TextStyle(color: Colors.green.shade900),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
 
+                // Error message
                 if (_errorMessage != null) ...[
                   const SizedBox(height: 16),
                   Container(
@@ -121,9 +220,17 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
                       borderRadius: BorderRadius.circular(8),
                       border: Border.all(color: Colors.red.shade200),
                     ),
-                    child: Text(
-                      _errorMessage!,
-                      style: TextStyle(color: Colors.red.shade900),
+                    child: Row(
+                      children: [
+                        Icon(Icons.error_outline, color: Colors.red.shade700, size: 20),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _errorMessage!,
+                            style: TextStyle(color: Colors.red.shade900),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -140,6 +247,9 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
                         : (_isPhoneStep ? _sendOTP : _verifyOTP),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppColors.primary,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
                     ),
                     child: _isLoading
                         ? const SizedBox(
@@ -193,27 +303,57 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
   }
 
   Future<void> _sendOTP() async {
+    final phone = _phoneController.text.trim();
+    if (phone.isEmpty) {
+      setState(() => _errorMessage = 'Please enter your phone number');
+      return;
+    }
+
+    // Validate Sri Lankan number
+    if (!_authService.smsService.isValidSriLankanNumber(phone)) {
+      setState(() => _errorMessage = 'Please enter a valid Sri Lankan mobile number');
+      return;
+    }
+
     setState(() {
       _errorMessage = null;
+      _successMessage = null;
       _isLoading = true;
     });
 
-    final result = await _authService.sendSignUpOTP(_phoneController.text);
+    final result = await _authService.sendSignUpOTP(phone);
 
     if (!mounted) return;
 
-    if (result['success']) {
+    if (result['success'] == true) {
       setState(() {
         _isPhoneStep = false;
         _isLoading = false;
-        _phoneNumber = _phoneController.text;
+        _phoneNumber = result['phoneNumber'] ?? phone;
+        _successMessage = 'OTP sent successfully!';
       });
+      _startResendTimer();
     } else {
       setState(() {
         _errorMessage = result['message'] ?? 'Failed to send OTP';
         _isLoading = false;
       });
 
+      // Handle rate limiting
+      if (result['rateLimited'] == true) {
+        final remaining = result['remainingSeconds'] ?? 60;
+        _resendCountdown = remaining;
+        _resendTimer?.cancel();
+        _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+          if (_resendCountdown > 0) {
+            setState(() => _resendCountdown--);
+          } else {
+            timer.cancel();
+          }
+        });
+      }
+
+      // Handle account exists
       if (result['accountExists'] == true) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -232,39 +372,75 @@ class _SignUpPhoneScreenState extends State<SignUpPhoneScreen> {
   }
 
   Future<void> _verifyOTP() async {
-    setState(() {
-      _errorMessage = null;
-      _isLoading = true;
-    });
-
-    // For now, just navigate to basic info screen
-    // In a real app, you'd verify the OTP first
-    if (_otpController.text.length != 6) {
-      setState(() {
-        _errorMessage = 'Please enter a valid 6-digit OTP';
-        _isLoading = false;
-      });
+    final otp = _otpController.text.trim();
+    if (otp.length != 6) {
+      setState(() => _errorMessage = 'Please enter a valid 6-digit OTP');
       return;
     }
 
-    // Navigate to basic info screen
-    if (!mounted) return;
-    
-    Navigator.pushNamed(
-      context,
-      '/signup-basic-info',
-      arguments: {
-        'authMethod': 'phone',
-        'phoneNumber': _phoneNumber,
-        'otp': _otpController.text,
-      },
+    setState(() {
+      _errorMessage = null;
+      _successMessage = null;
+      _isLoading = true;
+    });
+
+    // Verify OTP with Text.lk service
+    final verifyResult = await _authService.smsService.verifyOtp(
+      phoneNumber: _phoneController.text.trim(),
+      otpCode: otp,
     );
+
+    if (!mounted) return;
+
+    if (verifyResult['success'] == true) {
+      // Navigate to basic info screen with verified phone
+      Navigator.pushNamed(
+        context,
+        '/signup-basic-info',
+        arguments: {
+          'authMethod': 'phone',
+          'phoneNumber': verifyResult['phoneNumber'] ?? _phoneNumber,
+          'otp': otp,
+          'phoneVerified': true,
+        },
+      );
+    } else {
+      setState(() {
+        _errorMessage = verifyResult['message'] ?? 'Failed to verify OTP';
+        _isLoading = false;
+      });
+
+      // Go back to phone step on critical errors
+      if (verifyResult['expired'] == true || 
+          verifyResult['maxAttemptsExceeded'] == true || 
+          verifyResult['notFound'] == true) {
+        setState(() {
+          _isPhoneStep = true;
+          _otpController.clear();
+        });
+      }
+    }
   }
 
-  @override
-  void dispose() {
-    _phoneController.dispose();
-    _otpController.dispose();
-    super.dispose();
+  Future<void> _resendOTP() async {
+    setState(() {
+      _errorMessage = null;
+      _successMessage = null;
+      _isLoading = true;
+    });
+
+    final result = await _authService.resendSignUpOTP(_phoneController.text.trim());
+
+    if (!mounted) return;
+
+    setState(() => _isLoading = false);
+
+    if (result['success'] == true) {
+      setState(() => _successMessage = 'New OTP sent successfully!');
+      _startResendTimer();
+      _otpController.clear();
+    } else {
+      setState(() => _errorMessage = result['message'] ?? 'Failed to resend OTP');
+    }
   }
 }
